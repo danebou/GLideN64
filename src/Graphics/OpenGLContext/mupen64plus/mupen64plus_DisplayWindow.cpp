@@ -21,8 +21,11 @@ class DisplayWindowMupen64plus : public DisplayWindow
 {
 public:
 	DisplayWindowMupen64plus() {}
+	void start() override;
 
 private:
+	int m_bufferSize = 0;
+
 	void _setAttributes();
 	void _getDisplaySize();
 
@@ -34,12 +37,20 @@ private:
 	void _changeWindow() override;
 	void _readScreen(void **_pDest, long *_pWidth, long *_pHeight) override {}
 	void _readScreen2(void * _dest, int * _width, int * _height, int _front) override;
+	void _setBufferSize() override;
+	GLuint _pboIds[2][2] = {};
 };
 
 DisplayWindow & DisplayWindow::get()
 {
 	static DisplayWindowMupen64plus video;
 	return video;
+}
+
+void DisplayWindowMupen64plus::_setBufferSize() {
+	DisplayWindow::_setBufferSize();
+
+	m_bufferSize = m_width * m_height * 4;
 }
 
 void DisplayWindowMupen64plus::_setAttributes()
@@ -102,6 +113,25 @@ bool DisplayWindowMupen64plus::_start()
 void DisplayWindowMupen64plus::_stop()
 {
 	CoreVideo_Quit();
+}
+
+void DisplayWindowMupen64plus::start()
+{
+	DisplayWindow::start();
+	// create 2 pixel buffer objects, you need to delete them when program exits.
+	// glBufferDataARB with NULL pointer reserves only memory space.
+	for (int fb = 0; fb < 2; fb++) // front-back
+	{
+		//if (_pboIds[fb][0] != 0)
+			//glDeleteBuffers(2, _pboIds[fb]);
+		glGenBuffers(2, _pboIds[fb]);
+		for (int i = 0; i < 2; i++) {
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, _pboIds[fb][i]);
+			glBufferData(GL_PIXEL_PACK_BUFFER, m_bufferSize, 0, GL_STREAM_READ);
+		}
+	}
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 }
 
 void DisplayWindowMupen64plus::_swapBuffers()
@@ -181,11 +211,37 @@ void DisplayWindowMupen64plus::_readScreen2(void * _dest, int * _width, int * _h
 #ifndef GLES2
 	GLint oldMode;
 	glGetIntegerv(GL_READ_BUFFER, &oldMode);
-	if (_front != 0)
-		glReadBuffer(GL_FRONT);
-	else
-		glReadBuffer(GL_BACK);
-	glReadPixels(0, m_heightOffset, m_screenWidth, m_screenHeight, GL_BGRA, GL_UNSIGNED_BYTE, _dest);
+
+	// increment current index first then get the next index
+	// "index" is used to read pixels from a framebuffer to a PBO
+	// "nextIndex" is used to process pixels in the other PBO
+	static int index[2];
+	int nextIndex;
+	index[_front] = (index[_front] + 1) % 2;
+	nextIndex = (index[_front] + 1) % 2;
+
+	glReadBuffer(_front ? GL_FRONT : GL_BACK);
+	glReadBuffer(oldMode);
+
+	// Read pixels from current FrameBuffer
+	// copy pixels from framebuffer to PBO
+	// Use offset instead of ponter.
+	// OpenGL should perform asynch DMA transfer, so glReadPixels() will return immediately.
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, _pboIds[_front != 0][index[_front]]);
+	glReadPixels(0, m_heightOffset, m_screenWidth, m_screenHeight, GL_BGRA, GL_UNSIGNED_BYTE, 0);
+
+	// map the PBO that contain framebuffer pixels before processing it
+	//_dest;
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, _pboIds[_front != 0][nextIndex]);
+	//glGetBufferSubData(GL_PIXEL_PACK_BUFFER, 0, m_bufferSize, _dest);
+	GLubyte* src = (GLubyte*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+	if (src)
+	{
+		memcpy(_dest, src, m_bufferSize);
+		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);     // release pointer to the mapped buffer
+	}
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 	glReadBuffer(oldMode);
 #else
 	glReadPixels(0, m_heightOffset, m_screenWidth, m_screenHeight, GL_RGBA, GL_UNSIGNED_BYTE, pBufferData);
